@@ -3,9 +3,8 @@ import logging
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
-    COLOR_MODE_BRIGHTNESS,
-    COLOR_MODE_COLOR_TEMP,
+    ATTR_COLOR_TEMP_KELVIN,
+    ColorMode,
     LightEntity,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -19,6 +18,8 @@ from .const import DEV_TYPE_TO_HA, DOMAIN, VS_DISCOVERY, VS_FAN_TYPES, VS_LIGHTS
 
 _LOGGER = logging.getLogger(__name__)
 
+MIN_COLOR_TEMP_KELVIN = 2700
+MAX_COLOR_TEMP_KELVIN = 6500
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -102,18 +103,22 @@ class VeSyncBaseLight(VeSyncDevice, LightEntity):
         """Turn the device on."""
         attribute_adjustment_only = False
         # set white temperature
-        if self.color_mode in (COLOR_MODE_COLOR_TEMP,) and ATTR_COLOR_TEMP in kwargs:
-            # get white temperature from HA data
-            color_temp = int(kwargs[ATTR_COLOR_TEMP])
-            # ensure value between min-max supported Mireds
-            color_temp = max(self.min_mireds, min(color_temp, self.max_mireds))
-            # convert Mireds to Percent value that api expects
+        if (
+            self.color_mode == ColorMode.COLOR_TEMP
+            and ATTR_COLOR_TEMP_KELVIN in kwargs
+        ):
+            # get white temperature from HA data (in Kelvin)
+            kelvin = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
+            # ensure value within supported Kelvin range
+            kelvin = max(
+                self.min_color_temp_kelvin, min(kelvin, self.max_color_temp_kelvin)
+            )
+            # convert Kelvin to percent value that api expects
+            # (pyvesync scale: 0 = warmest, 100 = coldest — matches Kelvin direction)
             color_temp = round(
-                ((color_temp - self.min_mireds) / (self.max_mireds - self.min_mireds))
+                (kelvin - self.min_color_temp_kelvin) / (self.max_color_temp_kelvin - self.min_color_temp_kelvin)
                 * 100
             )
-            # flip cold/warm to what pyvesync api expects
-            color_temp = 100 - color_temp
             # ensure value between 0-100
             color_temp = max(0, min(color_temp, 100))
             # call pyvesync library api method to set color_temp
@@ -122,7 +127,7 @@ class VeSyncBaseLight(VeSyncDevice, LightEntity):
             attribute_adjustment_only = True
         # set brightness level
         if (
-            self.color_mode in (COLOR_MODE_BRIGHTNESS, COLOR_MODE_COLOR_TEMP)
+            self.color_mode in (ColorMode.BRIGHTNESS, ColorMode.COLOR_TEMP)
             and ATTR_BRIGHTNESS in kwargs
         ):
             # get brightness from HA data
@@ -147,12 +152,12 @@ class VeSyncDimmableLightHA(VeSyncBaseLight, LightEntity):
     @property
     def color_mode(self):
         """Set color mode for this entity."""
-        return COLOR_MODE_BRIGHTNESS
+        return ColorMode.BRIGHTNESS
 
     @property
     def supported_color_modes(self):
         """Flag supported color_modes (in an array format)."""
-        return [COLOR_MODE_BRIGHTNESS]
+        return [ColorMode.BRIGHTNESS]
 
 
 class VeSyncTunableWhiteLightHA(VeSyncBaseLight, LightEntity):
@@ -163,51 +168,49 @@ class VeSyncTunableWhiteLightHA(VeSyncBaseLight, LightEntity):
         super().__init__(device, coordinator)
 
     @property
-    def color_temp(self):
-        """Get device white temperature."""
-        # get value from pyvesync library api,
+    def color_temp_kelvin(self):
+        """Get device white temperature in Kelvin."""
         result = self.device.color_temp_pct
         try:
-            # check for validity of brightness value received
             color_temp_value = int(result)
         except ValueError:
-            # deal if any unexpected/non numeric value
             _LOGGER.debug(
                 "VeSync - received unexpected 'color_temp_pct' value from pyvesync api: %s",
                 result,
             )
-            return 0
-        # flip cold/warm
-        color_temp_value = 100 - color_temp_value
+            return  None
+
         # ensure value between 0-100
         color_temp_value = max(0, min(color_temp_value, 100))
-        # convert percent value to Mireds
-        color_temp_value = round(
-            self.min_mireds
-            + ((self.max_mireds - self.min_mireds) / 100 * color_temp_value)
+        # convert percent value to Kelvin
+        # (pyvesync scale: 0 = warmest, 100 = coldest — matches Kelvin direction)
+        kelvin = round(
+            self.min_color_temp_kelvin
+            + (self.max_color_temp_kelvin - self.min_color_temp_kelvin)
+            * color_temp_value
+            / 100
         )
-        # ensure value between minimum and maximum Mireds
-        return max(self.min_mireds, min(color_temp_value, self.max_mireds))
+        return max(self.min_color_temp_kelvin, min(kelvin, self.max_color_temp_kelvin))
 
     @property
-    def min_mireds(self):
-        """Set device coldest white temperature."""
-        return 154  # 154 Mireds ( 1,000,000 divided by 6500 Kelvin = 154 Mireds)
-
-    @property
-    def max_mireds(self):
+    def min_color_temp_kelvin(self):
         """Set device warmest white temperature."""
-        return 370  # 370 Mireds  ( 1,000,000 divided by 2700 Kelvin = 370 Mireds)
+        return MIN_COLOR_TEMP_KELVIN
+
+    @property
+    def max_color_temp_kelvin(self):
+        """Set device coldest white temperature."""
+        return MAX_COLOR_TEMP_KELVIN
 
     @property
     def color_mode(self):
         """Set color mode for this entity."""
-        return COLOR_MODE_COLOR_TEMP
+        return ColorMode.COLOR_TEMP
 
     @property
     def supported_color_modes(self):
         """Flag supported color_modes (in an array format)."""
-        return [COLOR_MODE_COLOR_TEMP]
+        return [ColorMode.COLOR_TEMP]
 
 
 class VeSyncNightLightHA(VeSyncDimmableLightHA):
